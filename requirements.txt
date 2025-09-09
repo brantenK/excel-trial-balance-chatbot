@@ -1,0 +1,27 @@
+# Excel Automation Dependencies
+# AI and Language Model Dependencies
+langchain>=0.1.0
+langchain-community>=0.0.20
+openai>=1.0.0
+# Fuzzy Matching
+fuzzywuzzy[speedup]>=0.18.0
+rapidfuzz>=3.0.0
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+# Utility Libraries
+colorama>=0.4.6
+tqdm>=4.65.0
+typing-extensions>=4.5.0
+
+# Environment Management
+python-dotenv>=1.0.0
+
+# GUI Framework
+PyQt6>=6.6.0
+
+# Excel integration
+xlwings>=0.30.0
+
+# Networking
+requests>=2.31.0
