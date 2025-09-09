@@ -524,8 +524,8 @@ class ChatMessage(QFrame):
         layout.addWidget(content_label)
         self.setLayout(layout)
 
-class ExcelChatBotGUI(QMainWindow):
-    """Main GUI application for Excel ChatBot"""
+class ExcelChatBotGUI(QWidget):
+    """Main GUI application for Excel ChatBot, designed as a side pane."""
     
     def __init__(self):
         super().__init__()
@@ -543,41 +543,33 @@ class ExcelChatBotGUI(QMainWindow):
         )
         
     def setup_ui(self):
-        """Setup the main user interface"""
-        self.setWindowTitle("Excel Trial Balance ChatBot")
-        self.setGeometry(100, 100, 1000, 700)
-        
-        # Central widget
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        
-        # Main layout
-        main_layout = QVBoxLayout(central_widget)
-        
-        # Create splitter for resizable panels
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        
-        # Left panel - Chat
+        """Setup the main user interface as a compact widget."""
+        self.setWindowTitle("Excel Assistant")
+        self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
+        self.setGeometry(100, 100, 400, 600)
+
+        # Since we are a QWidget now, we set the layout directly on self
+        main_layout = QVBoxLayout(self)
+
+        # The chat panel is now the main and only component
         chat_widget = self.create_chat_panel()
-        splitter.addWidget(chat_widget)
+        main_layout.addWidget(chat_widget)
+
+        # Create a custom status area
+        status_layout = QHBoxLayout()
+        self.status_label = QLabel("Ready")
+        self.status_label.setStyleSheet("color: #666;")
         
-        # Right panel - Controls and info
-        control_widget = self.create_control_panel()
-        splitter.addWidget(control_widget)
-        
-        # Set splitter proportions
-        splitter.setSizes([700, 300])
-        
-        main_layout.addWidget(splitter)
-        
-        # Status bar
-        self.status_bar = self.statusBar()
-        self.status_bar.showMessage("Ready")
-        
-        # Progress bar (initially hidden)
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        self.status_bar.addPermanentWidget(self.progress_bar)
+        self.progress_bar.setMaximumHeight(15)
+        self.progress_bar.setMaximumWidth(120)
+
+        status_layout.addWidget(self.status_label)
+        status_layout.addStretch()
+        status_layout.addWidget(self.progress_bar)
+
+        main_layout.addLayout(status_layout)
         
     def create_chat_panel(self):
         """Create the chat panel"""
@@ -614,76 +606,19 @@ class ExcelChatBotGUI(QMainWindow):
         
         return chat_widget
         
-    def create_control_panel(self):
-        """Create the control panel"""
-        control_widget = QWidget()
-        layout = QVBoxLayout(control_widget)
-        
-        # Quick actions
-        actions_group = QGroupBox("Quick Actions")
-        actions_layout = QVBoxLayout(actions_group)
-        
-        self.analyze_button = QPushButton("📊 Analyze Workbook")
-        self.update_button = QPushButton("🔄 Update Trial Balance")
-        self.help_button = QPushButton("❓ Help")
-        
-        actions_layout.addWidget(self.analyze_button)
-        actions_layout.addWidget(self.update_button)
-        actions_layout.addWidget(self.help_button)
-        
-        # Excel status
-        status_group = QGroupBox("Excel Status")
-        status_layout = QVBoxLayout(status_group)
-        
-        self.excel_status_label = QLabel("Checking Excel status...")
-        self.excel_status_label.setWordWrap(True)
-        
-        self.refresh_status_button = QPushButton("🔄 Refresh Status")
-        
-        status_layout.addWidget(self.excel_status_label)
-        status_layout.addWidget(self.refresh_status_button)
-        
-        # Settings
-        settings_group = QGroupBox("Settings")
-        settings_layout = QVBoxLayout(settings_group)
-        
-        self.auto_scroll_checkbox = QCheckBox("Auto-scroll chat")
-        self.auto_scroll_checkbox.setChecked(True)
-        
-        self.clear_chat_button = QPushButton("🗑️ Clear Chat")
-        
-        settings_layout.addWidget(self.auto_scroll_checkbox)
-        settings_layout.addWidget(self.clear_chat_button)
-        
-        # Add all groups to layout
-        layout.addWidget(actions_group)
-        layout.addWidget(status_group)
-        layout.addWidget(settings_group)
-        layout.addStretch()
-        
-        return control_widget
+    # The create_control_panel method is removed as it's no longer needed for the compact UI.
         
     def setup_connections(self):
         """Setup signal connections"""
         # UI connections
         self.send_button.clicked.connect(self.send_message)
         self.message_input.returnPressed.connect(self.send_message)
-        self.analyze_button.clicked.connect(self.analyze_workbook)
-        self.update_button.clicked.connect(self.start_update_process)
-        self.help_button.clicked.connect(self.show_help)
-        self.refresh_status_button.clicked.connect(self.refresh_excel_status)
-        self.clear_chat_button.clicked.connect(self.clear_chat)
         
         # ChatBot connections
         self.chatbot.message_received.connect(self.add_message)
         self.chatbot.error_occurred.connect(self.show_error)
         self.chatbot.progress_updated.connect(self.update_progress)
         self.chatbot.status_updated.connect(self.update_status)
-        
-        # Timer for periodic status updates
-        self.status_timer = QTimer()
-        self.status_timer.timeout.connect(self.refresh_excel_status)
-        self.status_timer.start(10000)  # Update every 10 seconds
         
     def setup_styling(self):
         """Setup application styling"""
@@ -772,24 +707,16 @@ class ExcelChatBotGUI(QMainWindow):
         # Insert before the stretch
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
         
-        # Auto-scroll if enabled
-        if self.auto_scroll_checkbox.isChecked():
-            QTimer.singleShot(100, self.scroll_to_bottom)
+        # Always auto-scroll
+        QTimer.singleShot(100, self.scroll_to_bottom)
             
     def scroll_to_bottom(self):
         """Scroll chat to bottom"""
         scrollbar = self.chat_scroll.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
         
-    def analyze_workbook(self):
-        """Analyze the current Excel workbook"""
-        if self.chatbot.isRunning():
-            self.show_error("Please wait for the current operation to complete.")
-            return
-            
-        self.chatbot.set_request('analyze_structure')
-        self.chatbot.start()
-        
+    # analyze_workbook, show_help, refresh_excel_status, and clear_chat are removed.
+    # Their functionality is now handled exclusively through chat commands.
     def start_update_process(self):
         """Start the redesigned trial balance update process."""
         try:
@@ -851,78 +778,6 @@ class ExcelChatBotGUI(QMainWindow):
         except Exception as e:
             logger.error(f"Error starting update process: {str(e)}\n{traceback.format_exc()}")
             self.show_error(f"Failed to start update process: {str(e)}")
-            
-    def show_help(self):
-        """Show help information"""
-        help_message = """🤖 **Excel Trial Balance Assistant Help**
-
-**Quick Actions:**
-• **Analyze Workbook** - Analyze the structure of your Excel workbook
-• **Update Trial Balance** - Start the guided update process
-• **Help** - Show this help message
-
-**Chat Commands:**
-• Type `analyze` to analyze your workbook
-• Type `update` to start updating trial balance
-• Type `help` to see available commands
-• Ask questions about Excel operations
-
-**Update Process:**
-1. Select the sheet containing trial balance data
-2. Map columns (Account, Debit, Credit)
-3. Preview proposed changes
-4. Confirm and execute updates
-
-**Tips:**
-• Make sure Excel is running with your workbook open
-• Ensure your trial balance data has clear column headers
-• Review all changes before confirming updates
-• Use the refresh button to update Excel status
-
-**Troubleshooting:**
-• If Excel status shows as disconnected, try refreshing
-• Ensure your workbook has the expected trial balance format
-• Check that column headers match expected patterns"""
-        
-        self.add_message(help_message, "assistant")
-        
-    def refresh_excel_status(self):
-        """Refresh Excel connection status"""
-        try:
-            processor = TrialBalanceProcessor()
-            status = processor.get_excel_status()
-            
-            status_text = "📊 **Excel Status**\n\n"
-            
-            if status['has_excel']:
-                status_text += "✅ Excel: Connected\n"
-                
-                if status['has_workbook']:
-                    status_text += f"✅ Workbook: {status['workbook_name']}\n"
-                    status_text += f"📄 Active Sheet: {status['active_sheet']}\n"
-                else:
-                    status_text += "❌ Workbook: None open\n"
-            else:
-                status_text += "❌ Excel: Not running\n"
-                
-            self.excel_status_label.setText(status_text)
-            
-        except Exception as e:
-            self.excel_status_label.setText(f"❌ Status check failed: {str(e)}")
-            
-    def clear_chat(self):
-        """Clear the chat history"""
-        # Remove all message widgets except the stretch
-        while self.chat_layout.count() > 1:
-            child = self.chat_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-                
-        # Add welcome message back
-        self.add_message(
-            "👋 Chat cleared! I'm ready to help with your Excel trial balance operations.",
-            "assistant"
-        )
         
     def show_error(self, error_message):
         """Show error message"""
@@ -931,17 +786,17 @@ class ExcelChatBotGUI(QMainWindow):
         
     def update_progress(self, value):
         """Update progress bar"""
-        if value > 0:
+        if value > 0 and value < 100:
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(value)
         else:
             self.progress_bar.setVisible(False)
             
     def update_status(self, status):
-        """Update status bar"""
-        self.status_bar.showMessage(status)
+        """Update status label"""
+        self.status_label.setText(status)
         
-        if status.lower() in ['ready', 'complete']:
+        if status.lower() in ['ready', 'update complete', 'analysis complete']:
             self.progress_bar.setVisible(False)
             
     def closeEvent(self, event):
