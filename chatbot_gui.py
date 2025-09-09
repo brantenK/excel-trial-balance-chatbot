@@ -18,10 +18,99 @@ import logging
 from datetime import datetime
 import traceback
 from excel_processor import TrialBalanceProcessor
-from interactive_dialogs import SheetSelectionDialog, ColumnMappingDialog, ProgressDialog, PreviewDialog
 
 # Load environment variables
 load_dotenv()
+
+# --- Start Rebuilt UI Components ---
+
+class ColumnMappingDialog(QDialog):
+    """A dialog to map columns for a sheet."""
+    def __init__(self, sheet_name, headers, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Column Mapping for '{sheet_name}'")
+        self.layout = QGridLayout(self)
+
+        # Fallback if headers are not found
+        if not headers:
+            headers = [f"Column {chr(ord('A') + i)}" for i in range(10)] # Default to 10 columns
+
+        self.headers = headers
+        self.column_letters = [chr(ord('A') + i) for i in range(len(headers))]
+
+        # Create widgets
+        self.layout.addWidget(QLabel(f"Configure columns for sheet '{sheet_name}':"), 0, 0, 1, 2)
+
+        self.layout.addWidget(QLabel("Account Name Column:"), 1, 0)
+        self.account_combo = QComboBox()
+        self.account_combo.addItems([f"{letter}: {name}" for letter, name in zip(self.column_letters, self.headers)])
+        self.layout.addWidget(self.account_combo, 1, 1)
+
+        self.layout.addWidget(QLabel("Current Year Column:"), 2, 0)
+        self.current_year_combo = QComboBox()
+        self.current_year_combo.addItems([f"{letter}: {name}" for letter, name in zip(self.column_letters, self.headers)])
+        self.layout.addWidget(self.current_year_combo, 2, 1)
+
+        self.layout.addWidget(QLabel("Prior Year Column:"), 3, 0)
+        self.prior_year_combo = QComboBox()
+        self.prior_year_combo.addItems([f"{letter}: {name}" for letter, name in zip(self.column_letters, self.headers)])
+        self.layout.addWidget(self.prior_year_combo, 3, 1)
+
+        # Buttons
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        self.layout.addWidget(self.button_box, 4, 0, 1, 2)
+
+    def get_mapping(self):
+        """Return the selected column mapping."""
+        return {
+            "account": self.account_combo.currentText().split(':')[0],
+            "current_year": self.current_year_combo.currentText().split(':')[0],
+            "prior_year": self.prior_year_combo.currentText().split(':')[0],
+        }
+
+class UpdateSetupDialog(QDialog):
+    """A dialog to select sheets for the update process."""
+    def __init__(self, sheet_names, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Setup Trial Balance Update")
+        self.layout = QGridLayout(self)
+
+        self.sheet_names = sheet_names
+
+        # Create widgets
+        self.layout.addWidget(QLabel("Select the sheets for the update process:"), 0, 0, 1, 2)
+
+        self.layout.addWidget(QLabel("Sheet to Update:"), 1, 0)
+        self.to_update_combo = QComboBox()
+        self.to_update_combo.addItems(sheet_names)
+        self.layout.addWidget(self.to_update_combo, 1, 1)
+
+        self.layout.addWidget(QLabel("Reference Sheet (with correct values):"), 2, 0)
+        self.reference_combo = QComboBox()
+        self.reference_combo.addItems(sheet_names)
+        self.layout.addWidget(self.reference_combo, 2, 1)
+
+        # Buttons
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        self.layout.addWidget(self.button_box, 3, 0, 1, 2)
+
+    def get_selection(self):
+        """Return the selected sheet names."""
+        to_update = self.to_update_combo.currentText()
+        reference = self.reference_combo.currentText()
+        if to_update == reference:
+            QMessageBox.warning(self, "Selection Error", "The 'to-update' sheet and the 'reference' sheet cannot be the same.")
+            return None
+        return {
+            "to_update_sheet": to_update,
+            "reference_sheet": reference,
+        }
+
+# --- End Rebuilt UI Components ---
 
 # Configure logging
 logging.basicConfig(
@@ -309,51 +398,70 @@ Be helpful, concise, and focus on Excel trial balance operations. Use emojis and
             return None
             
     def _perform_trial_balance_update(self, update_data):
-        """Perform the actual trial balance update"""
+        """Perform the trial balance update and add new accounts."""
         try:
             self.status_updated.emit("Performing trial balance update...")
             self.progress_updated.emit(10)
-            
-            # Extract update parameters
-            sheet_name = update_data.get('sheet_name')
-            column_mapping = update_data.get('column_mapping', {})
-            updates = update_data.get('updates', [])
-            
-            if not updates:
-                self.error_occurred.emit("No updates to perform")
+
+            # 1. Extract parameters from the new data structure
+            to_update_sheet = update_data.get('to_update_sheet')
+            reference_sheet = update_data.get('reference_sheet')
+            to_update_cols = update_data.get('to_update_cols')
+            reference_cols = update_data.get('reference_cols')
+
+            if not all([to_update_sheet, reference_sheet, to_update_cols, reference_cols]):
+                self.error_occurred.emit("Missing data for update process. Please start over.")
                 return
-                
+
+            # 2. Perform the update using the processor
+            self.status_updated.emit("Matching and updating existing accounts...")
             self.progress_updated.emit(30)
-            
-            # Perform the update using the processor
-            result = self.processor.update_trial_balance(
-                sheet_name=sheet_name,
-                column_mapping=column_mapping,
-                updates=updates
+            update_result = self.processor.update_trial_balance(
+                to_update_sheet=to_update_sheet,
+                correct_sheet=reference_sheet,
+                to_update_cols=to_update_cols,
+                correct_cols=reference_cols
             )
-            
-            self.progress_updated.emit(80)
-            
-            if result['success']:
-                message = f"✅ **Update Successful!**\n\n"
-                message += f"**Updated {result['updated_count']} accounts:**\n"
-                for account in result['updated_accounts']:
-                    message += f"• {account}\n"
-                    
-                if result['failed_accounts']:
-                    message += f"\n**⚠️ Failed to update {len(result['failed_accounts'])} accounts:**\n"
-                    for account in result['failed_accounts']:
-                        message += f"• {account}\n"
-                        
-                self.message_received.emit(message, "assistant")
-            else:
-                self.error_occurred.emit(f"Update failed: {result.get('error', 'Unknown error')}")
+
+            self.progress_updated.emit(70)
+
+            if update_result.get('status') != 'success':
+                self.error_occurred.emit(f"Update failed: {update_result.get('message', 'Unknown error')}")
+                return
+
+            # 3. Add new accounts if any were found
+            summary_message = f"✅ **Update Process Complete!**\n\n"
+            summary_message += f"**Updated {update_result.get('updates_made', 0)} existing accounts.**\n"
+
+            new_accounts = update_result.get('new_accounts', [])
+            if new_accounts:
+                self.status_updated.emit(f"Adding {len(new_accounts)} new accounts...")
+                self.progress_updated.emit(90)
                 
+                add_result = self.processor.add_new_accounts(
+                    sheet_name=to_update_sheet,
+                    new_accounts=new_accounts,
+                    column_mapping=to_update_cols
+                )
+
+                if add_result.get('status') == 'success':
+                    summary_message += f"**Successfully added {add_result.get('accounts_added', 0)} new accounts.**\n"
+                    summary_message += "New accounts added:\n"
+                    for acc in new_accounts[:5]: # Preview first 5
+                         summary_message += f"• {acc.get('account_name')}\n"
+                    if len(new_accounts) > 5:
+                        summary_message += "...\n"
+                else:
+                    summary_message += f"**⚠️ Failed to add new accounts:** {add_result.get('message', 'Unknown error')}\n"
+            else:
+                summary_message += "**No new accounts found to add.**\n"
+
+            self.message_received.emit(summary_message, "assistant")
             self.progress_updated.emit(100)
             self.status_updated.emit("Update complete")
-            
+
         except Exception as e:
-            logger.error(f"Error performing update: {str(e)}")
+            logger.error(f"Error performing update: {str(e)}\n{traceback.format_exc()}")
             self.error_occurred.emit(f"Update failed: {str(e)}")
 
 class ChatMessage(QFrame):
@@ -683,67 +791,65 @@ class ExcelChatBotGUI(QMainWindow):
         self.chatbot.start()
         
     def start_update_process(self):
-        """Start the trial balance update process"""
+        """Start the redesigned trial balance update process."""
         try:
-            # First check Excel status
+            # 1. Check Excel status
             processor = TrialBalanceProcessor()
             excel_status = processor.get_excel_status()
-            
-            if not excel_status['has_excel']:
-                self.show_error("Excel is not running. Please open Excel first.")
+            if not excel_status.get('workbook'):
+                self.show_error("Excel is not running or no workbook is open.")
                 return
-                
-            if not excel_status['has_workbook']:
-                self.show_error("No Excel workbook is open. Please open a workbook first.")
-                return
-                
-            # Show sheet selection dialog
+
             app = xw.apps.active
             wb = app.books.active
             sheet_names = [sheet.name for sheet in wb.sheets]
+
+            # 2. Show dual sheet selection dialog
+            setup_dialog = UpdateSetupDialog(sheet_names, self)
+            if setup_dialog.exec() != QDialog.DialogCode.Accepted:
+                return
             
-            dialog = SheetSelectionDialog(sheet_names, self)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                selected_sheet = dialog.get_selected_sheet()
-                
-                # Analyze the selected sheet
-                structure = processor.analyze_structure(selected_sheet)
-                
-                # Show column mapping dialog
-                mapping_dialog = ColumnMappingDialog(structure['headers'], self)
-                if mapping_dialog.exec() == QDialog.DialogCode.Accepted:
-                    column_mapping = mapping_dialog.get_mapping()
-                    
-                    # Extract trial balance data
-                    trial_balance_data = processor.extract_trial_balance_data(
-                        selected_sheet, column_mapping
-                    )
-                    
-                    if not trial_balance_data:
-                        self.show_error("No trial balance data found in the selected sheet.")
-                        return
-                        
-                    # Show preview dialog
-                    preview_dialog = PreviewDialog(trial_balance_data, self)
-                    if preview_dialog.exec() == QDialog.DialogCode.Accepted:
-                        updates = preview_dialog.get_updates()
-                        
-                        if updates:
-                            # Perform the update
-                            update_data = {
-                                'sheet_name': selected_sheet,
-                                'column_mapping': column_mapping,
-                                'updates': updates
-                            }
-                            
-                            self.chatbot.set_request('perform_update', update_data)
-                            if not self.chatbot.isRunning():
-                                self.chatbot.start()
-                        else:
-                            self.add_message("No updates were selected.", "assistant")
-                            
+            selection = setup_dialog.get_selection()
+            if not selection:
+                return # User selected same sheet for both, warning is shown in dialog
+
+            to_update_sheet_name = selection['to_update_sheet']
+            reference_sheet_name = selection['reference_sheet']
+
+            # 3. Get column mapping for the 'to-update' sheet
+            to_update_sheet = wb.sheets[to_update_sheet_name]
+            to_update_headers = to_update_sheet.range('A1').expand('right').value
+            mapping_dialog1 = ColumnMappingDialog(to_update_sheet_name, to_update_headers, self)
+            if mapping_dialog1.exec() != QDialog.DialogCode.Accepted:
+                return
+            to_update_cols = mapping_dialog1.get_mapping()
+
+            # 4. Get column mapping for the 'reference' sheet
+            reference_sheet = wb.sheets[reference_sheet_name]
+            reference_headers = reference_sheet.range('A1').expand('right').value
+            mapping_dialog2 = ColumnMappingDialog(reference_sheet_name, reference_headers, self)
+            if mapping_dialog2.exec() != QDialog.DialogCode.Accepted:
+                return
+            reference_cols = mapping_dialog2.get_mapping()
+
+            # 5. Package data and start background task
+            update_data = {
+                'to_update_sheet': to_update_sheet_name,
+                'reference_sheet': reference_sheet_name,
+                'to_update_cols': to_update_cols,
+                'reference_cols': reference_cols
+            }
+
+            if self.chatbot.isRunning():
+                self.show_error("An update process is already running.")
+                return
+
+            self.chatbot.set_request('perform_update', update_data)
+            self.add_message(f"Starting update process. Comparing '{to_update_sheet_name}' with '{reference_sheet_name}'.", "assistant")
+            self.chatbot.start()
+
         except Exception as e:
-            logger.error(f"Error starting update process: {str(e)}")
+            logger.error(f"Error starting update process: {str(e)}\n{traceback.format_exc()}")
             self.show_error(f"Failed to start update process: {str(e)}")
             
     def show_help(self):
