@@ -1,42 +1,21 @@
 import sys
 import json
+import os
+import requests
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget,
     QTextEdit, QLineEdit, QPushButton, QScrollArea, QFrame, QLabel,
     QMessageBox, QProgressBar, QDialog, QDialogButtonBox, QComboBox,
     QCheckBox, QSpinBox, QGroupBox, QGridLayout, QSplitter, QTabWidget,
-    QFileDialog, QListWidget, QListWidgetItem, QTextBrowser, QSizePolicy
+    QFileDialog, QListWidget, QListWidgetItem, QTextBrowser
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QSize
-from PyQt6.QtGui import QFont, QPixmap, QIcon, QPalette, QColor, QTextCursor
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
+from PyQt6.QtGui import QFont, QPixmap, QIcon
 import xlwings as xw
 from fuzzywuzzy import fuzz
-import requests
-import os
-from dotenv import load_dotenv
-import logging
 from datetime import datetime
-import traceback
-from excel_processor import TrialBalanceProcessor
-from interactive_dialogs import SheetSelectionDialog, ColumnMappingDialog, ProgressDialog, PreviewDialog
-
-# Load environment variables
-load_dotenv()
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('excel_chatbot.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 class ExcelChatBot(QThread):
-    """Background thread for handling Excel operations and API calls"""
-    
     message_received = pyqtSignal(str, str)  # message, sender
     error_occurred = pyqtSignal(str)
     progress_updated = pyqtSignal(int)
@@ -44,20 +23,21 @@ class ExcelChatBot(QThread):
     
     def __init__(self):
         super().__init__()
-        self.processor = TrialBalanceProcessor()
         self.api_key = os.getenv('OPENROUTER_API_KEY')
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
         self.conversation_history = []
         self.current_request = None
         self.is_processing = False
         
-    def set_request(self, request_type, data=None):
-        """Set the current request to be processed"""
+    def handle_excel_request(self, request_type, data=None):
+        """Handle different types of Excel requests"""
         self.current_request = {
             'type': request_type,
             'data': data or {}
         }
-        
+        if not self.isRunning():
+            self.start()
+    
     def run(self):
         """Main thread execution"""
         if not self.current_request:
@@ -69,94 +49,107 @@ class ExcelChatBot(QThread):
             data = self.current_request['data']
             
             if request_type == 'analyze_structure':
-                self._analyze_excel_structure()
+                self.analyze_excel_structure()
             elif request_type == 'guide_update':
-                self._guide_trial_balance_update(data.get('user_message', ''))
+                self.guide_trial_balance_update(data.get('user_message', ''))
             elif request_type == 'chat':
-                self._handle_chat_message(data.get('message', ''))
+                self.handle_chat_message(data.get('message', ''))
             elif request_type == 'perform_update':
-                self._perform_trial_balance_update(data)
+                self.perform_trial_balance_update(data)
                 
         except Exception as e:
-            logger.error(f"Error in thread execution: {str(e)}")
             self.error_occurred.emit(f"An error occurred: {str(e)}")
         finally:
             self.is_processing = False
-            
-    def _analyze_excel_structure(self):
+    
+    def analyze_excel_structure(self):
         """Analyze the structure of the active Excel workbook"""
         try:
             self.status_updated.emit("Analyzing Excel structure...")
             
-            # Get Excel status
-            excel_status = self.processor.get_excel_status()
-            
-            if not excel_status['has_excel']:
+            # Check if Excel is running
+            try:
+                app = xw.App.active
+                if not app.books:
+                    self.message_received.emit(
+                        "❌ No Excel workbook is currently open. Please open a workbook and try again.",
+                        "assistant"
+                    )
+                    return
+                    
+                wb = app.books.active
+                ws = wb.sheets.active
+                
+                # Get basic info
+                workbook_name = wb.name
+                sheet_name = ws.name
+                
+                # Get all sheet names
+                sheet_names = [sheet.name for sheet in wb.sheets]
+                
+                # Get data range
+                used_range = ws.used_range
+                if used_range:
+                    rows = used_range.shape[0]
+                    cols = used_range.shape[1]
+                    
+                    # Get headers (first row)
+                    headers = []
+                    if rows > 0:
+                        first_row = ws.range(f"A1:{chr(64 + cols)}1").value
+                        if isinstance(first_row, list):
+                            headers = [str(cell) if cell is not None else f"Column {i+1}" for i, cell in enumerate(first_row)]
+                        else:
+                            headers = [str(first_row) if first_row is not None else "Column 1"]
+                else:
+                    rows = cols = 0
+                    headers = []
+                
+                # Format the analysis message
+                message = f"📊 **Excel Workbook Analysis**\n\n"
+                message += f"**Workbook:** {workbook_name}\n"
+                message += f"**Active Sheet:** {sheet_name}\n\n"
+                
+                message += "**Available Sheets:**\n"
+                for sheet in sheet_names:
+                    message += f"• {sheet}\n"
+                    
+                message += f"\n**Data Range:** {rows} rows × {cols} columns\n"
+                
+                if headers:
+                    message += "\n**Column Headers:**\n"
+                    for i, header in enumerate(headers, 1):
+                        message += f"{i}. {header}\n"
+                
+                self.message_received.emit(message, "assistant")
+                self.status_updated.emit("Analysis complete")
+                
+            except Exception as e:
                 self.message_received.emit(
-                    "❌ No Excel application found. Please make sure Excel is installed and running.",
+                    f"❌ Error accessing Excel: {str(e)}\n\nPlease make sure Excel is running with a workbook open.",
                     "assistant"
                 )
-                return
                 
-            if not excel_status['has_workbook']:
-                self.message_received.emit(
-                    "📋 No Excel workbook is currently open. Please open a workbook and try again.",
-                    "assistant"
-                )
-                return
-                
-            # Analyze structure
-            structure = self.processor.analyze_structure()
-            
-            # Format the analysis message
-            message = f"📊 **Excel Workbook Analysis**\n\n"
-            message += f"**Workbook:** {structure['workbook_name']}\n"
-            message += f"**Active Sheet:** {structure['active_sheet']}\n\n"
-            
-            message += "**Available Sheets:**\n"
-            for sheet in structure['sheets']:
-                message += f"• {sheet}\n"
-                
-            message += f"\n**Data Range:** {structure['data_range']}\n"
-            message += f"**Total Rows:** {structure['total_rows']}\n"
-            message += f"**Total Columns:** {structure['total_columns']}\n\n"
-            
-            if structure['headers']:
-                message += "**Column Headers:**\n"
-                for i, header in enumerate(structure['headers'], 1):
-                    message += f"{i}. {header}\n"
-            
-            self.message_received.emit(message, "assistant")
-            self.status_updated.emit("Analysis complete")
-            
         except Exception as e:
-            logger.error(f"Error analyzing Excel structure: {str(e)}")
             self.error_occurred.emit(f"Failed to analyze Excel structure: {str(e)}")
-            
-    def _guide_trial_balance_update(self, user_message):
+    
+    def guide_trial_balance_update(self, user_message):
         """Guide the user through trial balance update process"""
         try:
             self.status_updated.emit("Processing your request...")
             
-            # Get Excel status first
-            excel_status = self.processor.get_excel_status()
+            # Check Excel status first
+            excel_info = self.get_excel_status()
             
-            if not excel_status['has_excel'] or not excel_status['has_workbook']:
-                self.message_received.emit(
-                    "Please ensure Excel is running with a workbook open before proceeding.",
-                    "assistant"
-                )
-                return
-                
             # Prepare context for AI
             context = {
                 'user_message': user_message,
-                'excel_status': excel_status,
+                'excel_info': excel_info,
                 'conversation_history': self.conversation_history[-5:]  # Last 5 messages for context
             }
             
             # Call OpenRouter API
-            response = self._call_openrouter_api(context)
+            response = self.call_openrouter_api(context)
             
             if response:
                 self.message_received.emit(response, "assistant")
@@ -178,10 +171,9 @@ class ExcelChatBot(QThread):
             self.status_updated.emit("Ready")
             
         except Exception as e:
-            logger.error(f"Error in guide update: {str(e)}")
             self.error_occurred.emit(f"Failed to process request: {str(e)}")
-            
-    def _handle_chat_message(self, message):
+    
+    def handle_chat_message(self, message):
         """Handle general chat messages"""
         try:
             self.status_updated.emit("Thinking...")
@@ -215,8 +207,7 @@ I can help you with:
 • Ask any questions about your Excel data!"""
                 
             elif 'analyze' in message_lower:
-                self.set_request('analyze_structure')
-                self.start()
+                self.handle_excel_request('analyze_structure')
                 return
                 
             elif 'update' in message_lower:
@@ -239,7 +230,7 @@ Would you like me to start by analyzing your current workbook structure?"""
                         'user_message': message,
                         'conversation_history': self.conversation_history[-3:]
                     }
-                    response = self._call_openrouter_api(context)
+                    response = self.call_openrouter_api(context)
                     if not response:
                         response = "I'm here to help with Excel trial balance operations. Try asking about 'analyze', 'update', or 'help'."
                 else:
@@ -249,10 +240,39 @@ Would you like me to start by analyzing your current workbook structure?"""
             self.status_updated.emit("Ready")
             
         except Exception as e:
-            logger.error(f"Error handling chat message: {str(e)}")
             self.error_occurred.emit(f"Failed to process message: {str(e)}")
-            
-    def _call_openrouter_api(self, context):
+    
+    def get_excel_status(self):
+        """Get current Excel application status"""
+        try:
+            app = xw.App.active
+            if not app.books:
+                return {
+                    'has_excel': True,
+                    'has_workbook': False,
+                    'workbook_name': None,
+                    'sheet_names': [],
+                    'active_sheet': None
+                }
+                
+            wb = app.books.active
+            return {
+                'has_excel': True,
+                'has_workbook': True,
+                'workbook_name': wb.name,
+                'sheet_names': [sheet.name for sheet in wb.sheets],
+                'active_sheet': wb.sheets.active.name
+            }
+        except:
+            return {
+                'has_excel': False,
+                'has_workbook': False,
+                'workbook_name': None,
+                'sheet_names': [],
+                'active_sheet': None
+            }
+    
+    def call_openrouter_api(self, context):
         """Call OpenRouter API for AI responses"""
         if not self.api_key:
             return None
@@ -301,18 +321,20 @@ Be helpful, concise, and focus on Excel trial balance operations. Use emojis and
                 result = response.json()
                 return result['choices'][0]['message']['content']
             else:
-                logger.error(f"API call failed: {response.status_code} - {response.text}")
                 return None
                 
         except Exception as e:
-            logger.error(f"Error calling OpenRouter API: {str(e)}")
             return None
-            
-    def _perform_trial_balance_update(self, update_data):
+    
+    def perform_trial_balance_update(self, update_data):
         """Perform the actual trial balance update"""
         try:
             self.status_updated.emit("Performing trial balance update...")
             self.progress_updated.emit(10)
+            
+            # Get Excel app and workbook
+            app = xw.App.active
+            wb = app.books.active
             
             # Extract update parameters
             sheet_name = update_data.get('sheet_name')
@@ -323,37 +345,57 @@ Be helpful, concise, and focus on Excel trial balance operations. Use emojis and
                 self.error_occurred.emit("No updates to perform")
                 return
                 
+            # Get the target sheet
+            if sheet_name and sheet_name in [s.name for s in wb.sheets]:
+                ws = wb.sheets[sheet_name]
+            else:
+                ws = wb.sheets.active
+                
             self.progress_updated.emit(30)
             
-            # Perform the update using the processor
-            result = self.processor.update_trial_balance(
-                sheet_name=sheet_name,
-                column_mapping=column_mapping,
-                updates=updates
-            )
+            # Perform updates
+            updated_accounts = []
+            failed_accounts = []
+            
+            for update in updates:
+                try:
+                    account_name = update.get('account')
+                    new_amount = update.get('amount')
+                    row_number = update.get('row')
+                    
+                    if row_number and new_amount is not None:
+                        # Update the amount in the specified row
+                        amount_col = column_mapping.get('amount', 'C')  # Default to column C
+                        cell_address = f"{amount_col}{row_number}"
+                        ws.range(cell_address).value = new_amount
+                        updated_accounts.append(account_name)
+                    else:
+                        failed_accounts.append(account_name)
+                        
+                except Exception as e:
+                    failed_accounts.append(f"{account_name} (Error: {str(e)})")
             
             self.progress_updated.emit(80)
             
-            if result['success']:
-                message = f"✅ **Update Successful!**\n\n"
-                message += f"**Updated {result['updated_count']} accounts:**\n"
-                for account in result['updated_accounts']:
+            # Save the workbook
+            wb.save()
+            
+            # Report results
+            message = f"✅ **Update Successful!**\n\n"
+            message += f"**Updated {len(updated_accounts)} accounts:**\n"
+            for account in updated_accounts:
+                message += f"• {account}\n"
+                
+            if failed_accounts:
+                message += f"\n**⚠️ Failed to update {len(failed_accounts)} accounts:**\n"
+                for account in failed_accounts:
                     message += f"• {account}\n"
                     
-                if result['failed_accounts']:
-                    message += f"\n**⚠️ Failed to update {len(result['failed_accounts'])} accounts:**\n"
-                    for account in result['failed_accounts']:
-                        message += f"• {account}\n"
-                        
-                self.message_received.emit(message, "assistant")
-            else:
-                self.error_occurred.emit(f"Update failed: {result.get('error', 'Unknown error')}")
-                
+            self.message_received.emit(message, "assistant")
             self.progress_updated.emit(100)
             self.status_updated.emit("Update complete")
             
         except Exception as e:
-            logger.error(f"Error performing update: {str(e)}")
             self.error_occurred.emit(f"Update failed: {str(e)}")
 
 class ChatMessage(QFrame):
@@ -424,7 +466,6 @@ class ExcelChatBotGUI(QMainWindow):
         self.chatbot = ExcelChatBot()
         self.setup_ui()
         self.setup_connections()
-        self.setup_styling()
         
         # Welcome message
         self.add_message(
@@ -470,58 +511,93 @@ class ExcelChatBotGUI(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.status_bar.addPermanentWidget(self.progress_bar)
-        
+    
     def create_chat_panel(self):
         """Create the chat panel"""
         chat_widget = QWidget()
         layout = QVBoxLayout(chat_widget)
         
-        # Chat history
+        # Chat title
+        title_label = QLabel("💬 Chat with Assistant")
+        title_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        title_label.setStyleSheet("padding: 10px; background-color: #f0f0f0; border-radius: 5px;")
+        layout.addWidget(title_label)
+        
+        # Chat messages area
         self.chat_scroll = QScrollArea()
         self.chat_scroll.setWidgetResizable(True)
         self.chat_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
+        # Chat messages container
         self.chat_container = QWidget()
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.addStretch()
-        
         self.chat_scroll.setWidget(self.chat_container)
+        
+        layout.addWidget(self.chat_scroll)
         
         # Input area
         input_layout = QHBoxLayout()
         
         self.message_input = QLineEdit()
-        self.message_input.setPlaceholderText("Type your message here...")
-        self.message_input.setMinimumHeight(40)
+        self.message_input.setPlaceholderText("Type your message here... (or try 'help', 'analyze', 'update')")
+        self.message_input.setFont(QFont("Arial", 10))
         
         self.send_button = QPushButton("Send")
-        self.send_button.setMinimumHeight(40)
-        self.send_button.setMinimumWidth(80)
+        self.send_button.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        self.send_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:pressed {
+                background-color: #3d8b40;
+            }
+        """)
         
         input_layout.addWidget(self.message_input)
         input_layout.addWidget(self.send_button)
         
-        layout.addWidget(self.chat_scroll)
         layout.addLayout(input_layout)
         
         return chat_widget
-        
+    
     def create_control_panel(self):
         """Create the control panel"""
         control_widget = QWidget()
         layout = QVBoxLayout(control_widget)
         
+        # Control title
+        title_label = QLabel("🎛️ Controls & Info")
+        title_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        title_label.setStyleSheet("padding: 10px; background-color: #f0f0f0; border-radius: 5px;")
+        layout.addWidget(title_label)
+        
         # Quick actions
         actions_group = QGroupBox("Quick Actions")
         actions_layout = QVBoxLayout(actions_group)
         
-        self.analyze_button = QPushButton("📊 Analyze Workbook")
-        self.update_button = QPushButton("🔄 Update Trial Balance")
-        self.help_button = QPushButton("❓ Help")
+        self.analyze_button = QPushButton("📊 Analyze Excel")
+        self.analyze_button.setToolTip("Analyze the structure of your current Excel workbook")
+        
+        self.update_button = QPushButton("🔄 Start Update Process")
+        self.update_button.setToolTip("Begin the trial balance update process")
+        
+        self.clear_button = QPushButton("🗑️ Clear Chat")
+        self.clear_button.setToolTip("Clear all chat messages")
         
         actions_layout.addWidget(self.analyze_button)
         actions_layout.addWidget(self.update_button)
-        actions_layout.addWidget(self.help_button)
+        actions_layout.addWidget(self.clear_button)
+        
+        layout.addWidget(actions_group)
         
         # Excel status
         status_group = QGroupBox("Excel Status")
@@ -529,42 +605,51 @@ class ExcelChatBotGUI(QMainWindow):
         
         self.excel_status_label = QLabel("Checking Excel status...")
         self.excel_status_label.setWordWrap(True)
+        self.excel_status_label.setStyleSheet("padding: 5px; background-color: #f9f9f9; border-radius: 3px;")
         
         self.refresh_status_button = QPushButton("🔄 Refresh Status")
         
         status_layout.addWidget(self.excel_status_label)
         status_layout.addWidget(self.refresh_status_button)
         
-        # Settings
-        settings_group = QGroupBox("Settings")
-        settings_layout = QVBoxLayout(settings_group)
-        
-        self.auto_scroll_checkbox = QCheckBox("Auto-scroll chat")
-        self.auto_scroll_checkbox.setChecked(True)
-        
-        self.clear_chat_button = QPushButton("🗑️ Clear Chat")
-        
-        settings_layout.addWidget(self.auto_scroll_checkbox)
-        settings_layout.addWidget(self.clear_chat_button)
-        
-        # Add all groups to layout
-        layout.addWidget(actions_group)
         layout.addWidget(status_group)
-        layout.addWidget(settings_group)
+        
+        # Help section
+        help_group = QGroupBox("Help & Tips")
+        help_layout = QVBoxLayout(help_group)
+        
+        help_text = QTextBrowser()
+        help_text.setMaximumHeight(150)
+        help_text.setMarkdown("""
+**Quick Commands:**
+• `help` - Show available commands
+• `analyze` - Analyze Excel structure
+• `update` - Start update process
+
+**Tips:**
+• Make sure Excel is open with your trial balance data
+• Use clear column headers for best results
+• The assistant can guide you through each step
+        """)
+        
+        help_layout.addWidget(help_text)
+        layout.addWidget(help_group)
+        
         layout.addStretch()
         
         return control_widget
-        
+    
     def setup_connections(self):
         """Setup signal connections"""
-        # UI connections
+        # Chat connections
         self.send_button.clicked.connect(self.send_message)
         self.message_input.returnPressed.connect(self.send_message)
-        self.analyze_button.clicked.connect(self.analyze_workbook)
+        
+        # Control panel connections
+        self.analyze_button.clicked.connect(self.analyze_excel)
         self.update_button.clicked.connect(self.start_update_process)
-        self.help_button.clicked.connect(self.show_help)
+        self.clear_button.clicked.connect(self.clear_chat)
         self.refresh_status_button.clicked.connect(self.refresh_excel_status)
-        self.clear_chat_button.clicked.connect(self.clear_chat)
         
         # ChatBot connections
         self.chatbot.message_received.connect(self.add_message)
@@ -575,63 +660,11 @@ class ExcelChatBotGUI(QMainWindow):
         # Timer for periodic status updates
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.refresh_excel_status)
-        self.status_timer.start(10000)  # Update every 10 seconds
+        self.status_timer.start(5000)  # Update every 5 seconds
         
-    def setup_styling(self):
-        """Setup application styling"""
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #ffffff;
-            }
-            
-            QGroupBox {
-                font-weight: bold;
-                border: 2px solid #cccccc;
-                border-radius: 5px;
-                margin-top: 1ex;
-                padding-top: 10px;
-            }
-            
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-            
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
-            
-            QLineEdit {
-                border: 2px solid #ddd;
-                border-radius: 4px;
-                padding: 8px;
-                font-size: 12px;
-            }
-            
-            QLineEdit:focus {
-                border-color: #4CAF50;
-            }
-            
-            QScrollArea {
-                border: 1px solid #ddd;
-                border-radius: 4px;
-            }
-        """)
-        
+        # Initial status check
+        QTimer.singleShot(1000, self.refresh_excel_status)
+    
     def send_message(self):
         """Send a message to the chatbot"""
         message = self.message_input.text().strip()
@@ -642,187 +675,95 @@ class ExcelChatBotGUI(QMainWindow):
         self.add_message(message, "user")
         self.message_input.clear()
         
-        # Process message based on content
+        # Handle special commands
         message_lower = message.lower()
         
-        if message_lower in ['analyze', 'analyze workbook', 'structure']:
-            self.analyze_workbook()
-        elif message_lower in ['update', 'update trial balance', 'perform update']:
+        if message_lower in ['clear', 'clear chat']:
+            self.clear_chat()
+            return
+        elif message_lower in ['status', 'excel status']:
+            self.refresh_excel_status()
+            return
+        elif message_lower in ['help', 'commands']:
+            self.chatbot.handle_excel_request('chat', {'message': 'help'})
+            return
+        elif message_lower in ['analyze', 'analyze excel']:
+            self.analyze_excel()
+            return
+        elif message_lower in ['update', 'start update']:
             self.start_update_process()
-        elif message_lower in ['help', 'what can you do', 'commands']:
-            self.show_help()
-        else:
-            # Send to chatbot for processing
-            self.chatbot.set_request('chat', {'message': message})
-            if not self.chatbot.isRunning():
-                self.chatbot.start()
-                
+            return
+        
+        # Send to chatbot for processing
+        self.chatbot.handle_excel_request('chat', {'message': message})
+    
     def add_message(self, message, sender):
         """Add a message to the chat"""
-        message_widget = ChatMessage(message, sender)
+        chat_message = ChatMessage(message, sender)
         
         # Insert before the stretch
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, message_widget)
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, chat_message)
         
-        # Auto-scroll if enabled
-        if self.auto_scroll_checkbox.isChecked():
-            QTimer.singleShot(100, self.scroll_to_bottom)
-            
+        # Scroll to bottom
+        QTimer.singleShot(100, self.scroll_to_bottom)
+    
     def scroll_to_bottom(self):
         """Scroll chat to bottom"""
         scrollbar = self.chat_scroll.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
-        
-    def analyze_workbook(self):
-        """Analyze the current Excel workbook"""
-        if self.chatbot.isRunning():
-            self.show_error("Please wait for the current operation to complete.")
-            return
-            
-        self.chatbot.set_request('analyze_structure')
-        self.chatbot.start()
-        
-    def start_update_process(self):
-        """Start the trial balance update process"""
-        try:
-            # First check Excel status
-            processor = TrialBalanceProcessor()
-            excel_status = processor.get_excel_status()
-            
-            if not excel_status['has_excel']:
-                self.show_error("Excel is not running. Please open Excel first.")
-                return
-                
-            if not excel_status['has_workbook']:
-                self.show_error("No Excel workbook is open. Please open a workbook first.")
-                return
-                
-            # Show sheet selection dialog
-            app = xw.apps.active
-            wb = app.books.active
-            sheet_names = [sheet.name for sheet in wb.sheets]
-            
-            dialog = SheetSelectionDialog(sheet_names, self)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                selected_sheet = dialog.get_selected_sheet()
-                
-                # Analyze the selected sheet
-                structure = processor.analyze_structure(selected_sheet)
-                
-                # Show column mapping dialog
-                mapping_dialog = ColumnMappingDialog(structure['headers'], self)
-                if mapping_dialog.exec() == QDialog.DialogCode.Accepted:
-                    column_mapping = mapping_dialog.get_mapping()
-                    
-                    # Extract trial balance data
-                    trial_balance_data = processor.extract_trial_balance_data(
-                        selected_sheet, column_mapping
-                    )
-                    
-                    if not trial_balance_data:
-                        self.show_error("No trial balance data found in the selected sheet.")
-                        return
-                        
-                    # Show preview dialog
-                    preview_dialog = PreviewDialog(trial_balance_data, self)
-                    if preview_dialog.exec() == QDialog.DialogCode.Accepted:
-                        updates = preview_dialog.get_updates()
-                        
-                        if updates:
-                            # Perform the update
-                            update_data = {
-                                'sheet_name': selected_sheet,
-                                'column_mapping': column_mapping,
-                                'updates': updates
-                            }
-                            
-                            self.chatbot.set_request('perform_update', update_data)
-                            if not self.chatbot.isRunning():
-                                self.chatbot.start()
-                        else:
-                            self.add_message("No updates were selected.", "assistant")
-                            
-        except Exception as e:
-            logger.error(f"Error starting update process: {str(e)}")
-            self.show_error(f"Failed to start update process: {str(e)}")
-            
-    def show_help(self):
-        """Show help information"""
-        help_message = """🤖 **Excel Trial Balance Assistant Help**
-
-**Quick Actions:**
-• **Analyze Workbook** - Analyze the structure of your Excel workbook
-• **Update Trial Balance** - Start the guided update process
-• **Help** - Show this help message
-
-**Chat Commands:**
-• Type `analyze` to analyze your workbook
-• Type `update` to start updating trial balance
-• Type `help` to see available commands
-• Ask questions about Excel operations
-
-**Update Process:**
-1. Select the sheet containing trial balance data
-2. Map columns (Account, Debit, Credit)
-3. Preview proposed changes
-4. Confirm and execute updates
-
-**Tips:**
-• Make sure Excel is running with your workbook open
-• Ensure your trial balance data has clear column headers
-• Review all changes before confirming updates
-• Use the refresh button to update Excel status
-
-**Troubleshooting:**
-• If Excel status shows as disconnected, try refreshing
-• Ensure your workbook has the expected trial balance format
-• Check that column headers match expected patterns"""
-        
-        self.add_message(help_message, "assistant")
-        
-    def refresh_excel_status(self):
-        """Refresh Excel connection status"""
-        try:
-            processor = TrialBalanceProcessor()
-            status = processor.get_excel_status()
-            
-            status_text = "📊 **Excel Status**\n\n"
-            
-            if status['has_excel']:
-                status_text += "✅ Excel: Connected\n"
-                
-                if status['has_workbook']:
-                    status_text += f"✅ Workbook: {status['workbook_name']}\n"
-                    status_text += f"📄 Active Sheet: {status['active_sheet']}\n"
-                else:
-                    status_text += "❌ Workbook: None open\n"
-            else:
-                status_text += "❌ Excel: Not running\n"
-                
-            self.excel_status_label.setText(status_text)
-            
-        except Exception as e:
-            self.excel_status_label.setText(f"❌ Status check failed: {str(e)}")
-            
+    
     def clear_chat(self):
-        """Clear the chat history"""
+        """Clear all chat messages"""
         # Remove all message widgets except the stretch
-        while self.chat_layout.count() > 1:
-            child = self.chat_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-                
+        for i in reversed(range(self.chat_layout.count() - 1)):
+            child = self.chat_layout.itemAt(i).widget()
+            if child:
+                child.setParent(None)
+        
         # Add welcome message back
         self.add_message(
             "👋 Chat cleared! I'm ready to help with your Excel trial balance operations.",
             "assistant"
         )
-        
+    
+    def analyze_excel(self):
+        """Analyze Excel structure"""
+        self.chatbot.handle_excel_request('analyze_structure')
+    
+    def start_update_process(self):
+        """Start the trial balance update process"""
+        self.add_message("Starting trial balance update process...", "user")
+        self.chatbot.handle_excel_request('chat', {
+            'message': 'I want to update my trial balance. Please guide me through the process.'
+        })
+    
+    def refresh_excel_status(self):
+        """Refresh Excel status display"""
+        try:
+            status = self.chatbot.get_excel_status()
+            
+            if not status['has_excel']:
+                status_text = "❌ Excel not detected"
+                color = "#ffebee"
+            elif not status['has_workbook']:
+                status_text = "⚠️ Excel running, no workbook open"
+                color = "#fff3e0"
+            else:
+                status_text = f"✅ Excel ready\nWorkbook: {status['workbook_name']}\nActive Sheet: {status['active_sheet']}"
+                color = "#e8f5e8"
+                
+            self.excel_status_label.setText(status_text)
+            self.excel_status_label.setStyleSheet(f"padding: 5px; background-color: {color}; border-radius: 3px;")
+            
+        except Exception as e:
+            self.excel_status_label.setText(f"❌ Error checking Excel: {str(e)}")
+            self.excel_status_label.setStyleSheet("padding: 5px; background-color: #ffebee; border-radius: 3px;")
+    
     def show_error(self, error_message):
         """Show error message"""
         self.add_message(f"❌ **Error:** {error_message}", "assistant")
-        logger.error(error_message)
-        
+        QMessageBox.warning(self, "Error", error_message)
+    
     def update_progress(self, value):
         """Update progress bar"""
         if value > 0:
@@ -830,20 +771,412 @@ class ExcelChatBotGUI(QMainWindow):
             self.progress_bar.setValue(value)
         else:
             self.progress_bar.setVisible(False)
-            
+    
     def update_status(self, status):
         """Update status bar"""
         self.status_bar.showMessage(status)
-        
         if status.lower() in ['ready', 'complete']:
             self.progress_bar.setVisible(False)
+    
+    def show_table_data(self, data, title="Table Data"):
+        """Show table data in a dialog"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setGeometry(200, 200, 800, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Create table widget
+        table_text = QTextBrowser()
+        
+        # Format data as markdown table
+        if data and len(data) > 0:
+            # Get headers
+            headers = list(data[0].keys()) if isinstance(data[0], dict) else [f"Column {i+1}" for i in range(len(data[0]))]
             
-    def closeEvent(self, event):
-        """Handle application close"""
-        if self.chatbot.isRunning():
-            self.chatbot.terminate()
-            self.chatbot.wait()
-        event.accept()
+            # Create markdown table
+            markdown = "| " + " | ".join(headers) + " |\n"
+            markdown += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+            
+            for row in data[:50]:  # Limit to first 50 rows
+                if isinstance(row, dict):
+                    values = [str(row.get(header, "")) for header in headers]
+                else:
+                    values = [str(cell) for cell in row]
+                markdown += "| " + " | ".join(values) + " |\n"
+                
+            if len(data) > 50:
+                markdown += f"\n*... and {len(data) - 50} more rows*"
+                
+            table_text.setMarkdown(markdown)
+        else:
+            table_text.setText("No data to display")
+            
+        layout.addWidget(table_text)
+        
+        # Close button
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        dialog.exec()
+    
+    def show_column_preview(self, columns, title="Column Preview"):
+        """Show column preview dialog"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setGeometry(200, 200, 600, 400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Info label
+        info_label = QLabel(f"Found {len(columns)} columns:")
+        info_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        layout.addWidget(info_label)
+        
+        # Column list
+        column_list = QListWidget()
+        for i, col in enumerate(columns, 1):
+            column_list.addItem(f"{i}. {col}")
+        layout.addWidget(column_list)
+        
+        # Close button
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        dialog.exec()
+    
+    def perform_trial_balance_update(self, update_data):
+        """Perform trial balance update with user confirmation"""
+        # Show confirmation dialog
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Question)
+        msg.setWindowTitle("Confirm Update")
+        msg.setText("Are you sure you want to perform the trial balance update?")
+        
+        details = f"Sheet: {update_data.get('sheet_name', 'Active sheet')}\n"
+        details += f"Updates: {len(update_data.get('updates', []))} accounts\n"
+        details += "\nThis will modify your Excel workbook. Make sure you have a backup!"
+        msg.setDetailedText(details)
+        
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            self.chatbot.handle_excel_request('perform_update', update_data)
+        else:
+            self.add_message("Update cancelled by user.", "assistant")
+    
+    def show_interactive_dialog(self, dialog_type, data=None):
+        """Show interactive dialog for user input"""
+        if dialog_type == 'sheet_selection':
+            return self.show_sheet_selection_dialog(data)
+        elif dialog_type == 'column_mapping':
+            return self.show_column_mapping_dialog(data)
+        elif dialog_type == 'preview_changes':
+            return self.show_preview_changes_dialog(data)
+        
+        return None
+    
+    def show_sheet_selection_dialog(self, sheets):
+        """Show sheet selection dialog"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Select Sheet")
+        dialog.setGeometry(300, 300, 400, 300)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Info label
+        info_label = QLabel("Select the sheet containing your trial balance data:")
+        layout.addWidget(info_label)
+        
+        # Sheet list
+        sheet_combo = QComboBox()
+        sheet_combo.addItems(sheets)
+        layout.addWidget(sheet_combo)
+        
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return sheet_combo.currentText()
+        return None
+    
+    def show_column_mapping_dialog(self, columns):
+        """Show column mapping dialog"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Map Columns")
+        dialog.setGeometry(250, 250, 500, 400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Info label
+        info_label = QLabel("Map your columns to trial balance fields:")
+        layout.addWidget(info_label)
+        
+        # Mapping grid
+        grid = QGridLayout()
+        
+        # Account column
+        grid.addWidget(QLabel("Account Name:"), 0, 0)
+        account_combo = QComboBox()
+        account_combo.addItems([''] + columns)
+        grid.addWidget(account_combo, 0, 1)
+        
+        # Debit column
+        grid.addWidget(QLabel("Debit Amount:"), 1, 0)
+        debit_combo = QComboBox()
+        debit_combo.addItems([''] + columns)
+        grid.addWidget(debit_combo, 1, 1)
+        
+        # Credit column
+        grid.addWidget(QLabel("Credit Amount:"), 2, 0)
+        credit_combo = QComboBox()
+        credit_combo.addItems([''] + columns)
+        grid.addWidget(credit_combo, 2, 1)
+        
+        # Balance column (optional)
+        grid.addWidget(QLabel("Balance (optional):"), 3, 0)
+        balance_combo = QComboBox()
+        balance_combo.addItems([''] + columns)
+        grid.addWidget(balance_combo, 3, 1)
+        
+        layout.addLayout(grid)
+        
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return {
+                'account': account_combo.currentText(),
+                'debit': debit_combo.currentText(),
+                'credit': credit_combo.currentText(),
+                'balance': balance_combo.currentText()
+            }
+        return None
+    
+    def show_preview_changes_dialog(self, changes):
+        """Show preview of changes dialog"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Preview Changes")
+        dialog.setGeometry(200, 200, 700, 500)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Info label
+        info_label = QLabel(f"Preview of {len(changes)} proposed changes:")
+        info_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        layout.addWidget(info_label)
+        
+        # Changes table
+        changes_text = QTextBrowser()
+        
+        # Format changes as markdown table
+        markdown = "| Account | Current | Proposed | Change |\n"
+        markdown += "| --- | --- | --- | --- |\n"
+        
+        for change in changes:
+            account = change.get('account', 'Unknown')
+            current = change.get('current_value', 'N/A')
+            proposed = change.get('proposed_value', 'N/A')
+            diff = change.get('difference', 'N/A')
+            markdown += f"| {account} | {current} | {proposed} | {diff} |\n"
+            
+        changes_text.setMarkdown(markdown)
+        layout.addWidget(changes_text)
+        
+        # Buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        return dialog.exec() == QDialog.DialogCode.Accepted
+    
+    def autonomous_mode(self):
+        """Run autonomous mode to automatically detect and update trial balance"""
+        try:
+            self.add_message("🤖 Starting autonomous mode...", "assistant")
+            self.update_status("Running autonomous mode...")
+            
+            # Step 1: Detect Excel and sheets
+            excel_status = self.chatbot.get_excel_status()
+            if not excel_status['has_excel'] or not excel_status['has_workbook']:
+                self.add_message("❌ Please ensure Excel is running with a workbook open.", "assistant")
+                return
+            
+            # Step 2: Auto-detect trial balance sheets
+            trial_balance_sheets = self.auto_detect_sheets(excel_status['sheet_names'])
+            
+            if not trial_balance_sheets:
+                self.add_message("❌ No trial balance sheets detected. Please ensure your workbook contains trial balance data.", "assistant")
+                return
+            
+            self.add_message(f"📊 Detected {len(trial_balance_sheets)} potential trial balance sheet(s): {', '.join(trial_balance_sheets)}", "assistant")
+            
+            # Step 3: Process each sheet
+            for sheet_name in trial_balance_sheets:
+                self.add_message(f"🔍 Analyzing sheet: {sheet_name}", "assistant")
+                
+                # Auto-detect columns
+                column_mapping = self.auto_detect_columns(sheet_name)
+                
+                if not column_mapping:
+                    self.add_message(f"⚠️ Could not detect trial balance columns in sheet '{sheet_name}'. Skipping...", "assistant")
+                    continue
+                
+                self.add_message(f"✅ Column mapping detected for '{sheet_name}': {column_mapping}", "assistant")
+                
+                # Preview changes (simplified for autonomous mode)
+                self.add_message(f"📋 Sheet '{sheet_name}' is ready for updates. Column mapping: {column_mapping}", "assistant")
+            
+            self.add_message("🎉 Autonomous analysis complete! Use the update commands to proceed with modifications.", "assistant")
+            self.update_status("Autonomous mode complete")
+            
+        except Exception as e:
+            self.add_message(f"❌ Error in autonomous mode: {str(e)}", "assistant")
+            self.update_status("Ready")
+    
+    def auto_detect_sheets(self, sheet_names):
+        """Auto-detect sheets that likely contain trial balance data"""
+        trial_balance_keywords = [
+            'trial', 'balance', 'tb', 'trial balance', 'trialbalance',
+            'accounts', 'ledger', 'general ledger', 'gl', 'chart of accounts'
+        ]
+        
+        detected_sheets = []
+        
+        for sheet_name in sheet_names:
+            sheet_lower = sheet_name.lower()
+            
+            # Check for keywords
+            for keyword in trial_balance_keywords:
+                if keyword in sheet_lower:
+                    detected_sheets.append(sheet_name)
+                    break
+            
+            # Also check sheet structure (if it has typical trial balance columns)
+            try:
+                app = xw.App.active
+                wb = app.books.active
+                ws = wb.sheets[sheet_name]
+                
+                # Get first few rows to check for typical headers
+                if ws.used_range and ws.used_range.shape[0] > 0:
+                    first_row = ws.range(f"A1:{chr(64 + min(10, ws.used_range.shape[1]))}1").value
+                    if isinstance(first_row, list):
+                        headers = [str(cell).lower() if cell else '' for cell in first_row]
+                    else:
+                        headers = [str(first_row).lower() if first_row else '']
+                    
+                    # Check for typical trial balance headers
+                    account_found = any('account' in h or 'name' in h for h in headers)
+                    amount_found = any(word in h for h in headers for word in ['debit', 'credit', 'balance', 'amount'])
+                    
+                    if account_found and amount_found and sheet_name not in detected_sheets:
+                        detected_sheets.append(sheet_name)
+                        
+            except Exception:
+                continue  # Skip sheets that can't be analyzed
+        
+        return detected_sheets
+    
+    def auto_detect_columns(self, sheet_name):
+        """Auto-detect column mapping for a trial balance sheet"""
+        try:
+            app = xw.App.active
+            wb = app.books.active
+            ws = wb.sheets[sheet_name]
+            
+            if not ws.used_range or ws.used_range.shape[0] == 0:
+                return None
+            
+            # Get headers (try first few rows)
+            headers = []
+            for row in range(1, min(4, ws.used_range.shape[0] + 1)):
+                row_data = ws.range(f"A{row}:{chr(64 + min(20, ws.used_range.shape[1]))}{row}").value
+                if isinstance(row_data, list):
+                    potential_headers = [str(cell) if cell else '' for cell in row_data]
+                else:
+                    potential_headers = [str(row_data) if row_data else '']
+                
+                # Check if this looks like a header row
+                if any(word in h.lower() for h in potential_headers for word in ['account', 'debit', 'credit', 'balance']):
+                    headers = potential_headers
+                    break
+            
+            if not headers:
+                return None
+            
+            # Map columns based on keywords
+            column_mapping = {}
+            
+            for i, header in enumerate(headers):
+                header_lower = header.lower()
+                col_letter = chr(65 + i)  # A, B, C, etc.
+                
+                # Account column
+                if any(word in header_lower for word in ['account', 'name', 'description']):
+                    if 'account' not in column_mapping:
+                        column_mapping['account'] = col_letter
+                
+                # Debit column
+                elif 'debit' in header_lower:
+                    column_mapping['debit'] = col_letter
+                
+                # Credit column
+                elif 'credit' in header_lower:
+                    column_mapping['credit'] = col_letter
+                
+                # Balance column
+                elif 'balance' in header_lower:
+                    column_mapping['balance'] = col_letter
+                
+                # Amount column (generic)
+                elif 'amount' in header_lower and 'debit' not in column_mapping and 'credit' not in column_mapping:
+                    column_mapping['amount'] = col_letter
+            
+            # Fallback: if we found account but no debit/credit, look for numeric columns
+            if 'account' in column_mapping and 'debit' not in column_mapping and 'credit' not in column_mapping:
+                # Find numeric columns after the account column
+                account_col_index = ord(column_mapping['account']) - 65
+                
+                for i in range(account_col_index + 1, len(headers)):
+                    if i < len(headers):
+                        col_letter = chr(65 + i)
+                        # Check if this column contains numeric data
+                        try:
+                            sample_value = ws.range(f"{col_letter}2").value
+                            if isinstance(sample_value, (int, float)):
+                                if 'debit' not in column_mapping:
+                                    column_mapping['debit'] = col_letter
+                                elif 'credit' not in column_mapping:
+                                    column_mapping['credit'] = col_letter
+                                    break
+                        except:
+                            continue
+            
+            # Return mapping if we found at least account column
+            if 'account' in column_mapping:
+                return column_mapping
+            
+            return None
+            
+        except Exception as e:
+            return None
 
 def main():
     """Main application entry point"""
@@ -852,15 +1185,16 @@ def main():
     # Set application properties
     app.setApplicationName("Excel Trial Balance ChatBot")
     app.setApplicationVersion("1.0")
-    app.setOrganizationName("Excel Automation Tools")
     
-    # Create and show main window
+    # Load API key from environment
+    from dotenv import load_dotenv
+    load_dotenv()
+    
+    # Create and show the main window
     window = ExcelChatBotGUI()
     window.show()
     
-    # Initial Excel status check
-    QTimer.singleShot(1000, window.refresh_excel_status)
-    
+    # Run the application
     sys.exit(app.exec())
 
 if __name__ == "__main__":
